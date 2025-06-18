@@ -44,6 +44,7 @@ Dieses Projekt realisiert einen intelligenten Watchdog auf einem Raspberry Pi 4.
 2.  **Python-Abhängigkeiten installieren:**
     ```bash
     pip install -r requirements.txt
+    pip install flask
     ```
 
 3.  **Konfiguration anpassen:**
