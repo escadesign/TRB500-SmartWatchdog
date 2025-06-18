@@ -5,15 +5,11 @@ import paramiko
 import ollama
 import threading
 import copy
+import re
 from collections import deque
 from flask import Flask, render_template
-import os
 
-# --- Band-Blacklist (LTE B28, 5G n28, n78) ---
-BLACKLISTED_BANDS_LTE = [28]
-BLACKLISTED_BANDS_NR = [28, 78]
-
-# --- Konfiguration und Globale Variablen ---
+# --- Konfiguration ---
 config = configparser.ConfigParser()
 config.read('config.ini')
 
@@ -25,36 +21,29 @@ LLM_API_URL = config.get('LLM', 'api_url')
 LLM_MODEL = config.get('LLM', 'model')
 
 WATCHDOG_CHECK_INTERVAL = config.getint('WATCHDOG', 'check_interval')
-WATCHDOG_MAX_ACTIONS_PER_HOUR = config.getint('WATCHDOG', 'max_actions_per_hour')
 WATCHDOG_LOG_FILE = config.get('WATCHDOG', 'log_file')
-WATCHDOG_MANUAL_OVERRIDE_FLAG = config.get('WATCHDOG', 'manual_override_flag')
 
 WEB_SERVER_HOST = config.get('WebServer', 'host', fallback='0.0.0.0')
 WEB_SERVER_PORT = config.getint('WebServer', 'port', fallback=5000)
 
-# --- Lese Prompt-Template ein ---
-def read_prompt_template():
-    with open('llm_prompt_template.txt', encoding='utf-8') as f:
-        return f.read()
+# --- LLM-Prompt laden ---
+with open('llm_prompt_template.txt', 'r', encoding='utf-8') as f:
+    PROMPT_TEMPLATE = f.read()
 
-PROMPT_TEMPLATE = read_prompt_template()
-
-# Thread-sichere Datenstruktur für den Austausch zwischen Watchdog und Webserver
+# --- Thread-sichere Datenstruktur ---
 shared_data = {
-    "log_messages": deque(maxlen=100),  # Speichert die letzten 100 Log-Nachrichten
+    "log_messages": deque(maxlen=100),
     "router_data": {},
-    "bands_data": [],
     "ollama_activity": {"prompt": "N/A", "response": "No activity yet.", "timestamp": ""},
     "settings": {}
 }
 data_lock = threading.Lock()
 
-# --- Logging Konfiguration ---
+# --- Logging ---
 class ListLogHandler(logging.Handler):
     def __init__(self, log_list):
         super().__init__()
         self.log_list = log_list
-
     def emit(self, record):
         log_entry = self.format(record)
         with data_lock:
@@ -67,133 +56,62 @@ list_handler = ListLogHandler(shared_data['log_messages'])
 list_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logging.getLogger().addHandler(list_handler)
 
-# --- Band-Parsing Hilfsfunktionen ---
-def band_friendly_name(entry):
-    rat = entry.get('rat', '')
-    band = entry.get('band', '?')
-    if rat == 'NR5G':
-        return f"n{band}"
-    return f"B{band}"
-
-def band_is_blacklisted(entry):
-    rat = entry.get('rat', '')
-    band = int(entry.get('band', -1))
-    if rat == 'NR5G':
-        return band in BLACKLISTED_BANDS_NR
-    elif rat == 'LTE':
-        return band in BLACKLISTED_BANDS_LTE
-    return False
-
-def parse_scan_results(raw_lines):
-    """
-    raw_lines: Liste von '+QSCAN: ...'-Textzeilen vom Router
-    Gibt Liste von Dicts: [{'rat':'LTE', 'band':3, 'RSRP':-80, 'RSRQ':-10, 'SINR':12}, ...]
-    """
-    results = []
-    for line in raw_lines:
-        try:
-            if "+QSCAN:" in line:
-                parts = line.split(",")
-                rat = parts[0].split('"')[1]  # "LTE" oder "NR5G"
-                band = int(parts[-1])
-                rsrp = int(parts[-5])
-                rsrq = int(parts[-4])
-                sinr = int(parts[-3])
-                results.append({
-                    'rat': rat,
-                    'band': band,
-                    'RSRP': rsrp,
-                    'RSRQ': rsrq,
-                    'SINR': sinr,
-                })
-        except Exception:
-            continue
-    return results
-
-def build_bands_prompt_block(scan_results):
-    lte_bands = []
-    nr_bands = []
-    for entry in scan_results:
-        name = band_friendly_name(entry)
-        if band_is_blacklisted(entry):
-            continue  # Band nicht anzeigen!
-        values = f"RSRP {entry['RSRP']}, RSRQ {entry['RSRQ']}, SINR {entry['SINR']}"
-        if entry['rat'] == 'NR5G':
-            nr_bands.append(f"{name}: {values}")
-        else:
-            lte_bands.append(f"{name}: {values}")
-    block = "## Aktuelle LTE-Bänder und Werte:\n" + ("\n".join(lte_bands) if lte_bands else "Keine LTE-Bänder erkannt.")
-    block += "\n## Aktuelle 5G-Bänder und Werte:\n" + ("\n".join(nr_bands) if nr_bands else "Keine 5G-Bänder erkannt.")
-    return block
-
-def get_band_context(scan_results):
-    # Zeige für den Prompt die aktuell genutzten Bänder (außer Blacklist)
-    active_lte = [f"B{e['band']}" for e in scan_results if e['rat'] == 'LTE' and not band_is_blacklisted(e)]
-    active_nr = [f"n{e['band']}" for e in scan_results if e['rat'] == 'NR5G' and not band_is_blacklisted(e)]
-    active_lte_str = ", ".join(active_lte) if active_lte else "Keine"
-    active_nr_str = ", ".join(active_nr) if active_nr else "Keine"
-    return active_nr_str, active_lte_str
-
-# --- SSH-Kommandos ---
-def fetch_router_scan(ssh):
-    # Holt die Bänder per AT-Kommando vom Router (QSCAN), gibt List of Lines zurück
+# --- Watchdog-Logik ---
+def get_router_status(ssh):
     try:
-        stdin, stdout, stderr = ssh.exec_command("gsmctl -A 'AT+QSCAN=3,1'")
-        raw = stdout.read().decode().splitlines()
-        return [line.strip() for line in raw if "+QSCAN:" in line]
-    except Exception as e:
-        logging.error(f"Fehler beim Band-Scan: {e}")
-        return []
-
-def get_router_data(ssh):
-    """Holt Daten vom Router und gibt sie als Dictionary zurück."""
-    try:
+        # Signalqualität
         stdin, stdout, stderr = ssh.exec_command("gsmctl -q")
         signal_quality = stdout.read().decode().strip()
 
+        # Modus
         stdin, stdout, stderr = ssh.exec_command("gsmctl -M")
         network_mode = stdout.read().decode().strip()
-        
-        stdin, stdout, stderr = ssh.exec_command("ifconfig wwan0 | grep 'RX packets'")
-        network_stats = stdout.read().decode().strip()
 
-        # Bands per AT-Scan
-        scan_lines = fetch_router_scan(ssh)
-        bands_data = parse_scan_results(scan_lines)
-        active_nr_band, active_lte_bands = get_band_context(bands_data)
+        # CA-Band Parsing (robust, Debuglog der Rohdaten)
+        stdin, stdout, stderr = ssh.exec_command("gsmctl -A 'AT+QCAINFO'")
+        ca_info = stdout.read().decode().strip()
+        logging.info(f"QCAINFO Rohdaten:\n{ca_info}")  # DEBUGLOG
+
+        active_nr_band = None
+        active_lte_bands = set()
+        found_any = False
+        for line in ca_info.splitlines():
+            if line.strip():
+                found_any = True
+            # NR5G: Suche nach 'NR5G BAND nXX' oder 'NR5G BAND XX'
+            match_nr = re.search(r'NR5G BAND n?(\d+)', line)
+            if match_nr:
+                active_nr_band = match_nr.group(1)
+            # LTE: Suche nach 'LTE BAND XX'
+            match_lte = re.search(r'LTE BAND (\d+)', line)
+            if match_lte:
+                active_lte_bands.add(match_lte.group(1))
 
         router_data = {
-            "signal_quality": signal_quality if signal_quality else "Keine Daten",
-            "network_mode": network_mode if network_mode else "Keine Daten",
-            "network_stats": network_stats if network_stats else "Keine Daten",
+            "signal_quality": signal_quality or 'Keine Daten',
+            "network_mode": network_mode or 'Keine Daten',
+            "active_nr_band": (
+                active_nr_band if active_nr_band else
+                ("keine Bandinfo" if found_any else "N/A")
+            ),
+            "active_lte_bands": (
+                ":".join(sorted(active_lte_bands)) if active_lte_bands else
+                ("keine Bandinfo" if found_any else "N/A")
+            ),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "active_nr_band": active_nr_band,
-            "active_lte_bands": active_lte_bands
         }
-        return router_data, bands_data
+        return router_data
     except Exception as e:
         logging.error(f"Fehler beim Abrufen der Router-Daten: {e}")
-        return None, []
+        return None
 
-# --- LLM Analyse ---
-def analyze_with_ollama(router_data, bands_data):
-    """Analysiert die Daten mit Ollama."""
+def analyze_with_ollama(router_data):
     try:
-        bands_prompt_block = build_bands_prompt_block(bands_data)
         prompt = PROMPT_TEMPLATE.format(
-            data=(
-                f"Signalqualität:\n{router_data['signal_quality']}\n"
-                f"Netzwerk Modus:\n{router_data['network_mode']}\n"
-                f"Netzwerk Stats:\n{router_data['network_stats']}\n"
-                f"Zeitstempel: {router_data['timestamp']}\n"
-                f"{bands_prompt_block}\n"
-                f"active_nr_band: {router_data['active_nr_band']}\n"
-                f"active_lte_bands: {router_data['active_lte_bands']}"
-            ),
-            active_nr_band=router_data['active_nr_band'],
-            active_lte_bands=router_data['active_lte_bands']
+            data=router_data,
+            active_nr_band=router_data.get("active_nr_band", "N/A"),
+            active_lte_bands=router_data.get("active_lte_bands", "N/A")
         )
-
         logging.info(f"Sende Anfrage an Ollama mit Modell {LLM_MODEL}...")
         response = ollama.chat(
             model=LLM_MODEL,
@@ -202,7 +120,6 @@ def analyze_with_ollama(router_data, bands_data):
         analysis_result = response['message']['content']
         logging.info(f"Antwort von Ollama erhalten: {analysis_result}")
 
-        # Update der Ollama-Aktivität für das Webinterface
         with data_lock:
             shared_data["ollama_activity"] = {
                 "prompt": prompt,
@@ -214,7 +131,41 @@ def analyze_with_ollama(router_data, bands_data):
         logging.error(f"Fehler bei der Kommunikation mit Ollama: {e}")
         return None
 
-# --- Watchdog-Logik ---
+def execute_router_action(ssh, action):
+    try:
+        if action.startswith("WAIT"):
+            logging.info(f"LLM empfiehlt: {action.replace('WAIT:', '').strip()} Minuten warten.")
+            return
+        if action == "RESTART_MODEM":
+            logging.info("LLM empfiehlt: Modem neu starten...")
+            ssh.exec_command("gsmctl -r")
+            return
+        if action == "RESET_BANDS":
+            logging.info("LLM empfiehlt: Band-Locks zurücksetzen und Modem neu starten.")
+            ssh.exec_command("gsmctl -A 'AT+QNWPREFCFG=\"lte_band\",1:3:20'")
+            ssh.exec_command("gsmctl -A 'AT+QNWPREFCFG=\"nr5g_band\",3'")
+            ssh.exec_command("gsmctl -r")
+            return
+        if action.startswith("SET_LTE_BANDS:"):
+            bands = action.replace("SET_LTE_BANDS:", "").strip()
+            logging.info(f"LLM empfiehlt: Band-Lock für LTE-Bänder {bands} setzen und Modem neu starten.")
+            ssh.exec_command(f"gsmctl -A 'AT+QNWPREFCFG=\"lte_band\",{bands}'")
+            ssh.exec_command("gsmctl -r")
+            return
+        if action.startswith("SET_NR5G_BANDS:"):
+            bands = action.replace("SET_NR5G_BANDS:", "").strip()
+            logging.info(f"LLM empfiehlt: Band-Lock für NR5G-Bänder {bands} setzen und Modem neu starten.")
+            ssh.exec_command(f"gsmctl -A 'AT+QNWPREFCFG=\"nr5g_band\",{bands}'")
+            ssh.exec_command("gsmctl -r")
+            return
+        if action == "FULL_SCAN":
+            logging.info("LLM empfiehlt: Vollständigen Scan (FULL_SCAN) – Achtung: Verbindung wird getrennt.")
+            ssh.exec_command("gsmctl -A 'AT+QSCAN=3,1'")
+            return
+        logging.warning(f"Unbekannte Aktion von LLM: {action}")
+    except Exception as e:
+        logging.error(f"Fehler bei der Ausführung der Router-Aktion '{action}': {e}")
+
 def watchdog_loop():
     logging.info("Watchdog-Thread gestartet.")
     while True:
@@ -225,14 +176,14 @@ def watchdog_loop():
                 ssh.connect(ROUTER_HOST, username=ROUTER_USER, password=ROUTER_PASS, timeout=10)
                 logging.info("SSH-Verbindung erfolgreich hergestellt.")
 
-                router_data, bands_data = get_router_data(ssh)
+                router_data = get_router_status(ssh)
                 if router_data:
                     logging.info(f"Router-Daten erfolgreich abgerufen: {router_data}")
                     with data_lock:
                         shared_data["router_data"] = router_data
-                        shared_data["bands_data"] = bands_data
-                    
-                    analyze_with_ollama(router_data, bands_data)
+                    action = analyze_with_ollama(router_data)
+                    if action:
+                        execute_router_action(ssh, action.strip())
                 else:
                     logging.warning("Konnte keine Router-Daten abrufen.")
 
@@ -258,8 +209,7 @@ def index():
 if __name__ == '__main__':
     settings_to_display = {
         'TRB500': {'ip': ROUTER_HOST, 'user': ROUTER_USER},
-        'LLM': {'model': LLM_MODEL, 'api_url': LLM_API_URL},
-        'General': {'check_interval': WATCHDOG_CHECK_INTERVAL},
+        'LLM': {'model': LLM_MODEL},
         'WebServer': {'host': WEB_SERVER_HOST, 'port': WEB_SERVER_PORT}
     }
     with data_lock:
