@@ -14,15 +14,22 @@ config = configparser.ConfigParser()
 config.read('config.ini')
 
 # Extrahiere Konfigurationen
-TRB500_IP = config.get('TRB500', 'ip')
-TRB500_USER = config.get('TRB500', 'user')
-TRB500_PASS = config.get('TRB500', 'password')
-PROMPT = config.get('Ollama', 'prompt')
-OLLAMA_MODEL = config.get('Ollama', 'model')
-CHECK_INTERVAL = config.getint('General', 'check_interval')
-WEB_SERVER_PORT = config.getint('WebServer', 'port', fallback=5000)
-WEB_SERVER_HOST = config.get('WebServer', 'host', fallback='0.0.0.0')
+# Extrahiere Konfigurationen aus der neuen ini-Struktur
 
+ROUTER_HOST = config.get('ROUTER', 'host')
+ROUTER_USER = config.get('ROUTER', 'user')
+ROUTER_PASS = config.get('ROUTER', 'password')
+
+LLM_API_URL = config.get('LLM', 'api_url')
+LLM_MODEL = config.get('LLM', 'model')
+
+WATCHDOG_CHECK_INTERVAL = config.getint('WATCHDOG', 'check_interval')
+WATCHDOG_MAX_ACTIONS_PER_HOUR = config.getint('WATCHDOG', 'max_actions_per_hour')
+WATCHDOG_LOG_FILE = config.get('WATCHDOG', 'log_file')
+WATCHDOG_MANUAL_OVERRIDE_FLAG = config.get('WATCHDOG', 'manual_override_flag')
+
+WEB_SERVER_HOST = config.get('WebServer', 'host', fallback='0.0.0.0')
+WEB_SERVER_PORT = config.getint('WebServer', 'port', fallback=5000)
 
 # Thread-sichere Datenstruktur für den Austausch zwischen Watchdog und Webserver
 shared_data = {
@@ -55,7 +62,6 @@ list_handler = ListLogHandler(shared_data['log_messages'])
 list_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
 logging.getLogger().addHandler(list_handler)
 
-
 # --- Watchdog-Logik ---
 def get_router_data(ssh):
     """Holt Daten vom Router und gibt sie als Dictionary zurück."""
@@ -84,10 +90,10 @@ def analyze_with_ollama(data):
     """Analysiert die Daten mit Ollama."""
     try:
         full_prompt = f"{PROMPT}\n\nRouter Data:\n{data}"
-        logging.info(f"Sende Anfrage an Ollama mit Modell {OLLAMA_MODEL}...")
+        logging.info(f"Sende Anfrage an Ollama mit Modell {LLM_MODEL}...")
         
         response = ollama.chat(
-            model=OLLAMA_MODEL,
+            model=LLM_MODEL,
             messages=[{'role': 'user', 'content': full_prompt}]
         )
         analysis_result = response['message']['content']
@@ -113,7 +119,7 @@ def watchdog_loop():
             logging.info("Stelle SSH-Verbindung zum TRB500 her...")
             with paramiko.SSHClient() as ssh:
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(TRB500_IP, username=TRB500_USER, password=TRB500_PASS, timeout=10)
+                ssh.connect(ROUTER_HOST, username=ROUTER_USER, password=ROUTER_PASS, timeout=10)
                 logging.info("SSH-Verbindung erfolgreich hergestellt.")
 
                 router_data = get_router_data(ssh)
@@ -134,7 +140,6 @@ def watchdog_loop():
         logging.info(f"Warte {CHECK_INTERVAL} Sekunden bis zur nächsten Prüfung.")
         time.sleep(CHECK_INTERVAL)
 
-
 # --- Flask Web Server ---
 # template_folder='.' weist Flask an, die HTML-Datei im selben Ordner zu suchen.
 app = Flask(__name__, template_folder='.')
@@ -147,13 +152,12 @@ def index():
         data_copy["log_messages"] = list(data_copy["log_messages"])
     return render_template('index.html', data=data_copy)
 
-
 # --- Hauptausführung ---
 if __name__ == '__main__':
     # Bereite die anzuzeigenden Einstellungen vor (Passwörter entfernen!)
     settings_to_display = {
-        'TRB500': {'ip': TRB500_IP, 'user': TRB500_USER},
-        'Ollama': {'model': OLLAMA_MODEL, 'prompt': PROMPT},
+        'TRB500': {'ip': ROUTER_HOST, 'user': ROUTER_USER},
+        'Ollama': {'model': LLM_MODEL, 'prompt': PROMPT},
         'General': {'check_interval': CHECK_INTERVAL},
         'WebServer': {'host': WEB_SERVER_HOST, 'port': WEB_SERVER_PORT}
     }
