@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="15">
+    <title>TRB500 SmartWatchdog - Dashboard</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f4f7f9;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .card h2 {
+            margin-top: 0;
+            color: #0056b3;
+            border-bottom: 2px solid #eef;
+            padding-bottom: 10px;
+        }
+        .log-container {
+            background-color: #2b2b2b;
+            color: #f0f0f0;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: "Courier New", Courier, monospace;
+            font-size: 0.9em;
+            overflow-y: auto;
+            height: 400px;
+            flex-grow: 1;
+        }
+        .log-container p {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .data-list { list-style-type: none; padding-left: 0; }
+        .data-list li { margin-bottom: 10px; }
+        .data-list strong { color: #555; min-width: 150px; display: inline-block; }
+        pre {
+            background-color: #eef;
+            padding: 10px;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+    </style>
+</head>
+<body>
+
+    <h1 style="text-align: center; color: #333;">TRB500 SmartWatchdog Dashboard</h1>
+
+    <div class="container">
+        <!-- Karte für System-Log -->
+        <div class="card">
+            <h2>System Log</h2>
+            <div class="log-container">
+                {% for message in data.log_messages %}
+                    <p>{{ message }}</p>
+                {% else %}
+                    <p>No log messages yet.</p>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Karte für Router-Werte & Ollama Aktivität -->
+        <div class="card">
+            <h2>Router Status</h2>
+            <ul class="data-list">
+                <li><strong>Letzte Prüfung:</strong> {{ data.router_data.timestamp or 'N/A' }}</li>
+                <li><strong>Signalqualität:</strong> {{ data.router_data.signal_quality or 'N/A' }}</li>
+                <li><strong>Netzwerk Modus:</strong> {{ data.router_data.network_mode or 'N/A' }}</li>
+                <li><strong>Netzwerk Stats:</strong> {{ data.router_data.network_stats or 'N/A' }}</li>
+            </ul>
+
+            <h2 style="margin-top: 20px;">Ollama Aktivität</h2>
+             <ul class="data-list">
+                <li><strong>Letzte Analyse:</strong> {{ data.ollama_activity.timestamp or 'N/A' }}</li>
+            </ul>
+            <h4>Letzte Antwort:</h4>
+            <pre>{{ data.ollama_activity.response }}</pre>
+        </div>
+
+        <!-- Karte für Einstellungen -->
+        <div class="card">
+            <h2>Konfiguration</h2>
+            {% for section, settings in data.settings.items() %}
+                <h3>{{ section }}</h3>
+                <ul class="data-list">
+                    {% for key, value in settings.items() %}
+                        <li><strong>{{ key }}:</strong> {{ value }}</li>
+                    {% endfor %}
+                </ul>
+            {% endfor %}
+        </div>
+    </div>
+
+</body>
+</html>
