@@ -60,6 +60,21 @@
             white-space: pre-wrap;
             word-wrap: break-word;
         }
+        .band-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 10px;
+        }
+        .band-table th, .band-table td {
+            border: 1px solid #e0e0e0;
+            padding: 8px;
+            text-align: left;
+            font-size: 1em;
+        }
+        .band-table th {
+            background-color: #f7fafd;
+            color: #0056b3;
+        }
     </style>
 </head>
 <body>
@@ -67,7 +82,7 @@
     <h1 style="text-align: center; color: #333;">TRB500 SmartWatchdog Dashboard</h1>
 
     <div class="container">
-        <!-- Karte für System-Log -->
+        <!-- System Log -->
         <div class="card">
             <h2>System Log</h2>
             <div class="log-container">
@@ -79,25 +94,55 @@
             </div>
         </div>
 
-        <!-- Karte für Router-Werte & Ollama Aktivität -->
+        <!-- Router Status, Bänder & Ollama -->
         <div class="card">
             <h2>Router Status</h2>
             <ul class="data-list">
                 <li><strong>Letzte Prüfung:</strong> {{ data.router_data.timestamp or 'N/A' }}</li>
                 <li><strong>Signalqualität:</strong> {{ data.router_data.signal_quality or 'N/A' }}</li>
-                <li><strong>Netzwerk Modus:</strong> {{ data.router_data.network_mode or 'N/A' }}</li>
-                <li><strong>Netzwerk Stats:</strong> {{ data.router_data.network_stats or 'N/A' }}</li>
+                <li><strong>Aktives 5G-Band:</strong> {{ data.router_data.active_nr_band or 'N/A' }}</li>
+                <li><strong>Aktive LTE-Bänder:</strong> {{ data.router_data.active_lte_bands or 'N/A' }}</li>
             </ul>
 
+            <h3 style="margin-top: 16px;">Aktive LTE/5G-Bänder</h3>
+            <table class="band-table">
+                <thead>
+                    <tr>
+                        <th>Band</th>
+                        <th>Typ</th>
+                        <th>RSRP</th>
+                        <th>RSRQ</th>
+                        <th>SINR</th>
+                    </tr>
+                </thead>
+                <tbody>
+                {% if data.bands_data %}
+                    {% for b in data.bands_data %}
+                        {% if (b.rat == 'LTE' and b.band != 28) or (b.rat == 'NR5G' and b.band not in [28, 78]) %}
+                        <tr>
+                            <td>{{ "n" if b.rat == 'NR5G' else "B" }}{{ b.band }}</td>
+                            <td>{{ b.rat }}</td>
+                            <td>{{ b.RSRP }}</td>
+                            <td>{{ b.RSRQ }}</td>
+                            <td>{{ b.SINR }}</td>
+                        </tr>
+                        {% endif %}
+                    {% endfor %}
+                {% else %}
+                    <tr><td colspan="5">Keine Bänder erkannt.</td></tr>
+                {% endif %}
+                </tbody>
+            </table>
+
             <h2 style="margin-top: 20px;">Ollama Aktivität</h2>
-             <ul class="data-list">
+            <ul class="data-list">
                 <li><strong>Letzte Analyse:</strong> {{ data.ollama_activity.timestamp or 'N/A' }}</li>
             </ul>
-            <h4>Letzte Antwort:</h4>
+            <h4>Letzte KI-Antwort:</h4>
             <pre>{{ data.ollama_activity.response }}</pre>
         </div>
 
-        <!-- Karte für Einstellungen -->
+        <!-- Einstellungen -->
         <div class="card">
             <h2>Konfiguration</h2>
             {% for section, settings in data.settings.items() %}
