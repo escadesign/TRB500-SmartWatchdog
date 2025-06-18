@@ -43,8 +43,11 @@ Dieses Projekt realisiert einen intelligenten Watchdog auf einem Raspberry Pi 4.
 
 2.  **Python-Abhängigkeiten installieren:**
     ```bash
+    python3 -m venv .venv
+    source .venv/bin/activate
     pip install -r requirements.txt
     pip install flask
+    pip install paramiko requests
     ```
 
 3.  **Konfiguration anpassen:**
